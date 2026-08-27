@@ -1,0 +1,19 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: delivery-lab
+
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - deployment.yaml
+  - service.yaml
+
+# Deliberately NOT using commonLabels: it injects into selector fields too, and
+# Deployment.spec.selector is immutable - the first `kubectl apply` after
+# changing a common label fails on an existing Deployment. Labels are set
+# explicitly on each object instead.
+
+images:
+  - name: ghcr.io/OWNER/delivery-lab
+    newTag: "1.0.0"

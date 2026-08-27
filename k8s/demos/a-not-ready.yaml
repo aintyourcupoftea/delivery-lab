@@ -1,0 +1,10 @@
+# A - Not ready. Pods stay Running and are NOT restarted; they are removed
+# from the Service endpoints, so the Service has zero backends.
+spec:
+  template:
+    spec:
+      containers:
+        - name: app
+          env:
+            - name: READY
+              value: "false"

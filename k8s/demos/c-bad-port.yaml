@@ -1,0 +1,10 @@
+# C - Bad container port. The process listens on 9090; the containerPort,
+# probes and Service targetPort all still say 8080.
+spec:
+  template:
+    spec:
+      containers:
+        - name: app
+          env:
+            - name: PORT
+              value: "9090"

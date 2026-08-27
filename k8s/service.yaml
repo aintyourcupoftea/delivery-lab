@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: delivery-lab
+  namespace: delivery-lab
+  labels:
+    app.kubernetes.io/name: delivery-lab
+spec:
+  type: ClusterIP
+  # This selector MUST match .spec.template.metadata.labels in the Deployment.
+  # A mismatch is the Q1 failure: pods Running, endpoints <none>, 100% of
+  # traffic refused, and nothing in the pod logs to explain it.
+  selector:
+    app.kubernetes.io/name: delivery-lab
+  ports:
+    - name: http
+      port: 80
+      # Named target port: the Service resolves "http" against the container's
+      # declared port name, so the numeric port lives in exactly one place
+      # (the Deployment) instead of two that can silently drift apart.
+      targetPort: http
+      protocol: TCP

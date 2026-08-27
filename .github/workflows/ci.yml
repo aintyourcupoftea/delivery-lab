@@ -1,0 +1,244 @@
+name: ci
+
+# pull_request (NOT pull_request_target). Fork PRs therefore run against the
+# fork's code with a read-only GITHUB_TOKEN and no access to repository
+# secrets - untrusted code never sits in the same job as a credential.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+# Least privilege at the workflow level; jobs widen only what they need.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # ---------------------------------------------------------------- 1. test
+  test:
+    name: lint + unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements-dev.txt
+      - run: python -m pytest tests/ -v
+
+      - name: shellcheck diagnose.sh
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck diagnose.sh
+
+  # ------------------------------------------------- 2. config / security scan
+  # Runs on PRs too: catching a bad manifest or a leaked key before merge is the
+  # entire point.
+  scan:
+    name: security + manifest validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Secrets scanning - catches the Q3 failure mode (a token committed or
+      # baked into a build arg) before it ever reaches a registry.
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Dockerfile lint - non-root, pinned base, no `latest`, no ADD from URLs.
+      - name: hadolint
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+          failure-threshold: warning
+
+      # Schema validation against the real Kubernetes OpenAPI schemas. Catches
+      # typos and wrong apiVersions that `kubectl apply --dry-run=client` misses.
+      - name: kubeconform
+        run: |
+          curl -sSL -o kubeconform.tar.gz \
+            https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
+          tar xzf kubeconform.tar.gz kubeconform
+          ./kubeconform -strict -summary -kubernetes-version 1.30.0 \
+            -ignore-missing-schemas k8s/
+
+      # Policy checks: probes present, resource limits set, runAsNonRoot,
+      # readOnlyRootFilesystem, no privileged containers.
+      - name: kube-linter
+        uses: stackrox/kube-linter-action@v1
+        with:
+          directory: k8s
+          config: .kube-linter.yaml
+
+  # ---------------------------------------------------------------- 3. build
+  build:
+    name: build image
+    runs-on: ubuntu-latest
+    needs: [test, scan]
+    permissions:
+      contents: read
+      packages: write
+      id-token: write # for keyless signing
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@v3
+
+      # GITHUB_TOKEN is short-lived and scoped to this repo - no long-lived
+      # registry password stored anywhere.
+      - name: log in to ghcr
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,format=long
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+
+      - id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          # PRs build but never push - a fork PR must not be able to publish.
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true
+          sbom: true
+
+      # Image CVE scan. Fails the build on fixable HIGH/CRITICAL only, so
+      # unfixable base-image noise does not block every deploy.
+      - name: trivy image scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+          format: table
+          exit-code: "1"
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+        if: github.event_name != 'pull_request'
+
+  # ------------------------------------------------------ 4. deploy (gated)
+  deploy:
+    name: deploy + verify rollout
+    runs-on: ubuntu-latest
+    needs: [build]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    # GitHub Environment with required reviewers + a deployment branch rule.
+    # This is where the human gate lives, not in a branch-name `if`.
+    environment:
+      name: staging
+
+    permissions:
+      contents: read
+      # The ONLY thing needed to authenticate to the cloud. No static keys.
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # ---- keyless cloud auth -------------------------------------------
+      # GitHub mints a short-lived OIDC token for this job; GCP exchanges it
+      # for a ~1h access token via Workload Identity Federation. The trust
+      # policy on the GCP side is pinned to this repo AND this ref, so another
+      # repo (or a PR branch) presenting a token is rejected.
+      # Nothing long-lived is stored in GitHub secrets - the two values below
+      # are non-secret identifiers.
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SA }}
+
+      - uses: google-github-actions/get-gke-credentials@v2
+        with:
+          cluster_name: ${{ vars.GKE_CLUSTER }}
+          location: ${{ vars.GKE_LOCATION }}
+
+      # ---- render manifests ----------------------------------------------
+      - name: pin image to an immutable digest
+        run: |
+          set -euo pipefail
+          IMAGE="${REGISTRY}/${IMAGE_NAME}@${{ needs.build.outputs.digest }}"
+          echo "deploying $IMAGE"
+          cd k8s
+          kustomize edit set image "ghcr.io/OWNER/delivery-lab=${IMAGE}"
+
+      - name: roll pods on config change
+        run: |
+          set -euo pipefail
+          SUM=$(sha256sum k8s/configmap.yaml | cut -d' ' -f1)
+          sed -i "s|REPLACED_BY_CI|${SUM}|" k8s/deployment.yaml
+
+      # Server-side dry run validates against admission controllers and the
+      # live cluster's API, not just a local schema.
+      - name: server-side dry run
+        run: kubectl apply -k k8s/ --dry-run=server
+
+      - name: apply
+        run: kubectl apply -k k8s/
+
+      # ---- verify ---------------------------------------------------------
+      # This is the gate that turns "kubectl applied successfully" into
+      # "the new version is actually serving". It returns non-zero when the
+      # Deployment hits progressDeadlineSeconds, which is exactly failure E.
+      - name: verify rollout
+        id: rollout
+        run: |
+          kubectl -n delivery-lab rollout status deploy/delivery-lab --timeout=6m
+
+      # Rollout status only proves pods are Ready. Hit the Service to prove the
+      # path Service -> Endpoints -> Pod actually works end to end.
+      - name: smoke test through the Service
+        run: |
+          set -euo pipefail
+          kubectl -n delivery-lab run smoke-$GITHUB_RUN_ID \
+            --image=curlimages/curl:8.11.1 --restart=Never --rm -i --quiet -- \
+            curl -fsS --max-time 5 http://delivery-lab.delivery-lab.svc.cluster.local/health/ready
+
+      # Automatic rollback is deliberately opt-in, not the default - see README.
+      - name: report failure
+        if: failure() && steps.rollout.outcome == 'failure'
+        run: |
+          echo "::error::rollout did not become available; previous ReplicaSet is still serving"
+          kubectl -n delivery-lab get pods -o wide
+          kubectl -n delivery-lab get events --sort-by=.lastTimestamp | tail -40
+          echo "recover with: kubectl -n delivery-lab rollout undo deploy/delivery-lab"
+          exit 1

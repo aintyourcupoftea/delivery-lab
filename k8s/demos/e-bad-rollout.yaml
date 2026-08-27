@@ -1,0 +1,13 @@
+# E - Bad rollout. New pods come up but never pass readiness. With
+# maxUnavailable: 0 the old ReplicaSet keeps serving; the rollout stalls and
+# fails at progressDeadlineSeconds (300s).
+spec:
+  template:
+    spec:
+      containers:
+        - name: app
+          env:
+            - name: APP_VERSION
+              value: "1.1.0-broken"
+            - name: READY
+              value: "false"

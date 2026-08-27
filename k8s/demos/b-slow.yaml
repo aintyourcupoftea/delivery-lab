@@ -1,0 +1,10 @@
+# B - Slow request. /work sleeps 5s. Probes hit /health/* and are unaffected,
+# so the pod stays Ready while user-visible latency is terrible.
+spec:
+  template:
+    spec:
+      containers:
+        - name: app
+          env:
+            - name: WORK_DELAY
+              value: "5"

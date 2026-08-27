@@ -1,0 +1,15 @@
+.git
+.github
+.venv
+__pycache__
+*.pyc
+tests
+k8s
+compose.yaml
+diagnose.sh
+README.md
+*.md
+.env
+.env.*
+*.pem
+*.key

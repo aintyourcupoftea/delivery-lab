@@ -1,0 +1,7 @@
+# Clears the demo env overrides and falls back to the ConfigMap values.
+spec:
+  template:
+    spec:
+      containers:
+        - name: app
+          env: null

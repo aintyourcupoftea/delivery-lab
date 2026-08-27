@@ -1,0 +1,165 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: delivery-lab
+  namespace: delivery-lab
+  labels:
+    app.kubernetes.io/name: delivery-lab
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+
+  # If a new ReplicaSet has not gone Available within 5 minutes, the Deployment
+  # is marked Progressing=False/ProgressDeadlineExceeded. That is the condition
+  # `kubectl rollout status` fails on, which is how CI detects failure E
+  # instead of hanging forever.
+  progressDeadlineSeconds: 300
+  minReadySeconds: 10
+
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # maxUnavailable: 0 -> capacity never dips below 2 during a rollout, so a
+      # bad image degrades deploy speed rather than user-facing availability.
+      maxUnavailable: 0
+      maxSurge: 1
+
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: delivery-lab
+
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: delivery-lab
+      annotations:
+        # Rolls the pods when config changes; without this a ConfigMap edit is
+        # invisible to running containers that read env at startup.
+        # CI recomputes this: kubectl create cm ... --dry-run -o yaml | sha256sum
+        checksum/config: "REPLACED_BY_CI"
+    spec:
+      # ---- graceful termination -------------------------------------------
+      # Timeline on pod deletion:
+      #   t=0    pod marked Terminating; endpoint removal and preStop start
+      #          *concurrently* - this is the race the drain window covers
+      #   t=0-5  preStop sleeps 5s -> kube-proxy/ingress deprogram this pod
+      #   t=5    SIGTERM. The app does NOT close its socket: readiness flips to
+      #          503 and it keeps serving for DRAIN_SECONDS (5s). Plain uvicorn
+      #          closes the listener immediately here, which is what turns a
+      #          "graceful" shutdown into connection-refused for in-flight
+      #          clients.
+      #   t=10   uvicorn begins its own drain, up to GRACEFUL_TIMEOUT (20s)
+      #   t=45   SIGKILL if still alive
+      # 45 > 5 + 5 + 20, with headroom for a slow /work request.
+      terminationGracePeriodSeconds: 45
+
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+
+      containers:
+        - name: app
+          image: ghcr.io/OWNER/delivery-lab:1.0.0 # CI replaces with an immutable digest
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            # The Service targets this by NAME. Failure demo C is what happens
+            # when the process actually listens somewhere else.
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+
+          envFrom:
+            - configMapRef:
+                name: delivery-lab-config
+
+          # ---- probes ----
+          # startupProbe guards the other two while the process boots, so
+          # liveness can stay aggressive without killing slow starts.
+          startupProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            periodSeconds: 2
+            failureThreshold: 30 # up to 60s to start
+            timeoutSeconds: 2
+
+          # Liveness = "is THIS process wedged?" No dependencies, no shutdown
+          # awareness. Failing it means restart, so it must never depend on
+          # anything a restart cannot fix (Q2).
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+
+          # Readiness = "should this pod receive traffic right now?" Failing it
+          # removes the pod from endpoints; it does not restart anything.
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2
+            successThreshold: 1
+
+          resources:
+            requests:
+              # Requests drive scheduling and the QoS class. cpu==limit and
+              # mem==limit -> Guaranteed QoS, evicted last under node pressure.
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "128Mi"
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - "sleep 5"
+
+      volumes:
+        - name: tmp
+          emptyDir: {}
+
+      # Spread replicas across nodes so a single node loss cannot take out the
+      # whole Deployment. ScheduleAnyway keeps a 1-node kind/minikube working.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: delivery-lab
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: delivery-lab
+  namespace: delivery-lab
+spec:
+  # Node drains and cluster upgrades cannot take both replicas at once.
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: delivery-lab

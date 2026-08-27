@@ -1,0 +1,52 @@
+services:
+  app:
+    build:
+      context: .
+    image: delivery-lab:local
+    ports:
+      - "8080:8080"
+
+    # Environment only - no secrets in this file. Values that would be secret
+    # come from a git-ignored .env (see .env.example), which is why env_file is
+    # marked optional rather than committed.
+    environment:
+      APP_VERSION: ${APP_VERSION:-dev}
+      READY: ${READY:-true}
+      WORK_DELAY: ${WORK_DELAY:-0}
+      PORT: "8080"
+      DRAIN_SECONDS: "5"
+      GRACEFUL_TIMEOUT: "20"
+    env_file:
+      - path: .env
+        required: false
+
+    # Compose has no readiness concept, so this healthcheck deliberately hits
+    # /health/ready: locally, "healthy" is the signal other services wait on
+    # via depends_on.condition: service_healthy.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/health/ready', timeout=2).status==200 else 1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+    # unless-stopped, not always: a container I stopped by hand stays stopped
+    # across a daemon restart. Crash loops still restart.
+    restart: unless-stopped
+
+    stop_grace_period: 30s
+
+    # Mirrors the Kubernetes limits so local memory-pressure behaviour matches.
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 128M
+        reservations:
+          memory: 64M
+
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp

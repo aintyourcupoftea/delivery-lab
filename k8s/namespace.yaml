@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: delivery-lab
+  labels:
+    app.kubernetes.io/name: delivery-lab
+    # Enforce the restricted Pod Security Standard: the Deployment below is
+    # already compliant, so this fails closed if someone relaxes it later.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
