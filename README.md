@@ -46,8 +46,8 @@ curl localhost:8080/health/ready
 
 # kubernetes (kind)
 kind create cluster --name delivery-lab
-docker build -t ghcr.io/OWNER/delivery-lab:1.0.0 .
-kind load docker-image ghcr.io/OWNER/delivery-lab:1.0.0 --name delivery-lab
+docker build -t ghcr.io/aintyourcupoftea/delivery-lab:1.0.0 .
+kind load docker-image ghcr.io/aintyourcupoftea/delivery-lab:1.0.0 --name delivery-lab
 kubectl apply -k k8s/
 kubectl -n delivery-lab rollout status deploy/delivery-lab
 

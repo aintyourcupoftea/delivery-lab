@@ -63,7 +63,7 @@ spec:
 
       containers:
         - name: app
-          image: ghcr.io/OWNER/delivery-lab:1.0.0 # CI replaces with an immutable digest
+          image: ghcr.io/aintyourcupoftea/delivery-lab:1.0.0 # CI replaces with an immutable digest
           imagePullPolicy: IfNotPresent
 
           ports:

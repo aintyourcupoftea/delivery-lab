@@ -199,7 +199,7 @@ jobs:
           IMAGE="${REGISTRY}/${IMAGE_NAME}@${{ needs.build.outputs.digest }}"
           echo "deploying $IMAGE"
           cd k8s
-          kustomize edit set image "ghcr.io/OWNER/delivery-lab=${IMAGE}"
+          kustomize edit set image "ghcr.io/aintyourcupoftea/delivery-lab=${IMAGE}"
 
       - name: roll pods on config change
         run: |

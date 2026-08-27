@@ -15,5 +15,5 @@ resources:
 # explicitly on each object instead.
 
 images:
-  - name: ghcr.io/OWNER/delivery-lab
+  - name: ghcr.io/aintyourcupoftea/delivery-lab
     newTag: "1.0.0"
